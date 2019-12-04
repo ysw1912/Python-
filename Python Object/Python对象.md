@@ -1,0 +1,152 @@
+# Python对象
+
+Python所有东西都是变量，即`PyObject`。
+
+```c
+typedef struct _object {
+    _PyObject_HEAD_EXTRA
+    Py_ssize_t ob_refcnt;
+    struct _typeobject *ob_type;
+} PyObject;
+
+#define PyObject_HEAD                   PyObject ob_base;
+```
+
+- Release模式下，_PyObject_HEAD_EXTRA为空
+- ob_refcnt，表示一个对象的引用计数，是Python垃圾回收机制的一部分
+- struct _typeobject，即PyTypeObject，用来指定一个对象的类型
+
+指向任一Python对象的指针都可以转换成`PyObject*`，在Python内部各个函数之间传递的都是该泛型指针`PyObject*`，通过指针的ob_type域动态地调用不同类型的相关操作，实现了多态。
+
+## 变长对象
+
+Python中大多变量都是可变长度的，例如list。
+
+```c
+typedef struct {
+    PyObject ob_base;
+    Py_ssize_t ob_size; /* Number of items in variable part */
+} PyVarObject;
+
+#define PyObject_VAR_HEAD      PyVarObject ob_base;
+```
+
+- 从ob_base可以看出，PyVarObject是对PyObject的扩展
+- ob_size指明了变长对象中容纳了多少元素
+
+# 类型对象
+
+```c
+typedef struct _typeobject {
+    PyObject_VAR_HEAD
+    const char *tp_name; /* For printing, in format "<module>.<name>" */
+    Py_ssize_t tp_basicsize, tp_itemsize; /* For allocation */
+
+    /* Methods to implement standard operations */
+    destructor tp_dealloc;
+    ...
+
+    /* Method suites for standard classes */
+    PyNumberMethods *tp_as_number;
+    PySequenceMethods *tp_as_sequence;
+    PyMappingMethods *tp_as_mapping;
+
+    /* More standard operations (here for binary compatibility) */
+    hashfunc tp_hash;
+    ...
+} PyTypeObject;
+```
+
+类型对象PyTypeObject主要包含3类信息：
+
+- tp_name，类型名
+- 创建该类型的对象时分配的内存大小，tp_basicsize和tp_itemsize
+- 表示该类型对象相关操作的函数指针，例如tp_hash表明对该类型生成hash值的方法，hashfunc实质上是一个函数指针：`typedef Py_hash_t (*hashfunc)(PyObject *);`
+
+PyNumberMethods、PySequenceMethods、PyMappingMethods是三组重要的函数族：
+
+- PyNumberMethods定义了一个数值对象支持的操作
+
+  ```c
+  typedef struct {
+      binaryfunc nb_add;
+      binaryfunc nb_subtract;
+      ...
+  } PyNumberMethods;
+  ```
+
+- PySequenceMethods定义了一个序列对象（如list）支持的操作
+
+  ```c
+  typedef struct {
+      lenfunc sq_length;
+      binaryfunc sq_concat;
+      ...
+  } PySequenceMethods;
+  ```
+
+- PyMappingMethods定义了一个关联对象（如dict）支持的操作
+
+  ```c
+  typedef struct {
+      lenfunc mp_length;
+      binaryfunc mp_subscript;
+      ...
+  } PyMappingMethods;
+  ```
+
+## 类型的类型
+
+在PyTypeObject的开头是PyObject_VAR_HEAD，说明Python中的类型实际上也是个对象。
+
+```python
+>>> type(type)
+<class 'type'>
+```
+
+类型对象PyTypeObject的类型也是PyTypeObject，通过PyType_Type变量来确定一个对象是类型对象，所有用户自定义的class所对应的PyTypeObject都是通过PyType_Type创建的，它是所有class的class，成为metaclass。
+
+```c
+#define PyObject_HEAD_INIT(type)        \
+    { _PyObject_EXTRA_INIT              \
+    1, type },
+
+#define PyVarObject_HEAD_INIT(type, size)       \
+    { PyObject_HEAD_INIT(type) size },
+
+PyTypeObject PyType_Type = {
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+    "type",                                     /* tp_name */
+    sizeof(PyHeapTypeObject),                   /* tp_basicsize */
+    sizeof(PyMemberDef),                        /* tp_itemsize */
+        
+    (destructor)type_dealloc,                   /* tp_dealloc */
+   ...
+};
+```
+
+回顾PyVarObject的定义，可以看出PyVarObject_HEAD_INIT这个宏所作的初始化动作：
+
+- 将引用计数ob_refcnt赋为1
+- 将PyTypeObject* ob_type赋为某种type的指针，这里为&PyType_Type
+- 将变长对象的长度ob_size赋值，这里为0
+
+## 多态
+
+PyTypeObject通过其第三类信息——表示该类型对象相关操作的函数指针，完成多态性。
+
+例如某个对象析构时，会使用_Py_Dealloc宏，该析构动作就是通过该对象对应的类型对象ob_type中定义的函数指针tp_dealloc来决定的。
+
+```c
+#define _PyObject_CAST(op)      ((PyObject*)(op))
+#define Py_TYPE(ob)             (_PyObject_CAST(ob)->ob_type)
+
+static inline void _Py_Dealloc_inline(PyObject *op)
+{
+    destructor dealloc = Py_TYPE(op)->tp_dealloc;
+    (*dealloc)(op);
+}
+
+#define _Py_Dealloc(op) _Py_Dealloc_inline(op)
+```
+
